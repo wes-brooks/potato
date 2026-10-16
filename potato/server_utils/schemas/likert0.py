@@ -1,0 +1,248 @@
+"""
+Likert Scale Layout
+
+Generates a likert scale rating interface with radio buttons arranged horizontally.
+Each button represents a point on the scale between min_label and max_label.
+
+Creating HTML-based Likert scale interfaces
+that can be used for collecting ordinal data responses. The scale supports:
+- Customizable number of points
+- Optional numeric display
+- Keyboard shortcuts
+- Required/optional validation
+- Bad text option for invalid inputs
+"""
+
+import logging
+from collections.abc import Mapping
+
+from potato.ai.ai_help_wrapper import get_ai_wrapper, get_dynamic_ai_help
+
+from .identifier_utils import (
+    safe_generate_layout,
+    generate_element_identifier,
+    generate_element_value,
+    generate_validation_attribute,
+    escape_html_content,
+    generate_layout_attributes,
+    bad_text_label_content,
+    display_label_text
+)
+from .radio import generate_radio_layout
+
+logger = logging.getLogger(__name__)
+
+def generate_likert0_layout(annotation_scheme):
+    """
+    Generate HTML for a likert scale annotation interface.
+
+    Args:
+        annotation_scheme (dict): Configuration including:
+            - name: Schema identifier
+            - description: Display description
+            - size: Number of scale points
+            - min_label: Label for minimum value
+            - max_label: Label for maximum value
+            - sequential_key_binding: Enable number key bindings (1-9)
+            - displaying_score: Show numeric values on buttons
+            - label_requirement: Validation settings
+                - required (bool): Whether response is mandatory
+            - bad_text_label (dict): Optional configuration for invalid text option
+                - label_content (str): Label text for bad text option
+            - annotation_id (int): match the config schema index
+
+    Returns:
+        tuple: (html_string, key_bindings)
+            html_string: Complete HTML for the likert scale interface
+            key_bindings: List of (key, description) tuples for keyboard shortcuts
+
+    Raises:
+        Exception: If required fields are missing from annotation_scheme
+    """
+    return safe_generate_layout(annotation_scheme, _generate_likert_layout_internal)
+
+
+def _radio_scheme_for_labelled_likert(annotation_scheme):
+    """Carry `displaying_score` and `bad_text_label` into the radio path.
+
+    A likert with an explicit `labels` list is rendered by the radio
+    generator, which knows about neither option -- so both were accepted by
+    the validator, documented as optional on likert, and silently dropped.
+    A scale asking for an "Unreadable" escape hatch rendered five points and
+    no way out of them.
+
+    The original scheme is not mutated: it is the config's own dict, shared
+    with the validator, the preview tool and the exported spec.
+    """
+    scheme = dict(annotation_scheme)
+    labels = list(scheme.get("labels") or [])
+
+    if scheme.get("displaying_score"):
+        # Number each option in the order it is written. `displayed_label`
+        # changes only what is shown -- the stored value stays the label name.
+        numbered = []
+        for position, label_data in enumerate(labels, 1):
+            visible = display_label_text(label_data, annotation_scheme)
+            entry = dict(label_data) if isinstance(label_data, Mapping) else {"name": label_data}
+            entry["displayed_label"] = f"{position}. {visible}"
+            numbered.append(entry)
+        labels = numbered
+
+    bad_text_content = bad_text_label_content(scheme)
+    if bad_text_content:
+        labels = labels + [{"name": "bad_text", "displayed_label": bad_text_content}]
+
+    scheme["labels"] = labels
+    return scheme
+
+
+def _generate_likert_layout_internal(annotation_scheme):
+    """
+    Internal function to generate likert layout after validation.
+    """
+    logger.debug(f"Generating likert layout for schema: {annotation_scheme['name']}")
+
+    # Use radio layout if complex labels specified
+    if "labels" in annotation_scheme:
+        logger.info(f"Complex labels detected for {annotation_scheme['name']}, using radio layout")
+        return generate_radio_layout(
+            _radio_scheme_for_labelled_likert(annotation_scheme), horizontal=False)
+
+    # Validate required fields
+    required_fields = ["size", "min_label", "max_label"]
+    for required in required_fields:
+        if required not in annotation_scheme:
+            error_msg = f'Likert scale for "{annotation_scheme["name"]}" missing required field: {required}'
+            logger.error(error_msg)
+            raise Exception(error_msg)
+
+    logger.debug(f"Creating {annotation_scheme['size']}-point likert scale")
+
+    # Setup validation and key bindings
+    key_bindings = []
+    validation = generate_validation_attribute(annotation_scheme)
+
+    # Check for pre-allocated keys from the centralized allocator
+    allocated_keys = annotation_scheme.get("_allocated_keys", None)
+    allocated_map = {}
+    if allocated_keys:
+        for entry in allocated_keys:
+            if entry.get("key"):
+                allocated_map[entry["label"]] = entry["key"]
+
+    # Get layout attributes for grid positioning
+    layout_attrs = generate_layout_attributes(annotation_scheme)
+
+    # Initialize form wrapper
+    schematic = f"""
+    <form id="{escape_html_content(annotation_scheme['name'])}" class="annotation-form likert shadcn-likert-container" action="javascript:void(0)" data-annotation-id="{escape_html_content(str(annotation_scheme.get("annotation_id", "")))}" data-annotation-type="likert" data-schema-name="{escape_html_content(annotation_scheme['name'])}" {layout_attrs}>
+        {get_ai_wrapper()}
+        <fieldset schema="{escape_html_content(annotation_scheme['name'])}">
+            <legend class="shadcn-likert-title">{escape_html_content(annotation_scheme['description'])}</legend>
+            <div class="shadcn-likert-scale" style="max-width: min(100%, calc(300px + {annotation_scheme['size']} * 40px + 250px));">
+                <div class="shadcn-likert-endpoint">{escape_html_content(annotation_scheme['min_label'])}</div>
+                <div class="shadcn-likert-options">
+                    <div class="shadcn-likert-track"></div>
+    """
+
+    # Generate scale points
+    #
+    # `value` is the scale point itself, always. It used to come from
+    # generate_element_value(), which returns str(index % 10) under
+    # sequential_key_binding — so a 10-point scale stored point 10 as "0", and an
+    # 11-point scale gave points 1 and 11 the same value. The exported column
+    # `<schema>.10` then read 0, which is not an ordinal and defeats the entire point
+    # of a likert. With bad_text_label enabled, point 10 also collided with bad_text's
+    # hardcoded value="0".
+    #
+    # The keyboard shortcut lives in `data-key`, matching radio.py. The keydown handler
+    # (static/annotation.js) matches exclusively on data-key and likert never emitted
+    # one, so `sequential_key_binding: true` on a likert gave no working shortcuts at
+    # all — it only corrupted the stored value. This is a leftover from the
+    # pre-data-key design that every other schema was migrated off.
+    sequential = (annotation_scheme.get("sequential_key_binding")
+                  and annotation_scheme["size"] <= 10)
+    for i in range(annotation_scheme["size"]):
+        label = f"{i}"
+        identifiers = generate_element_identifier(annotation_scheme['name'], label, "radio")
+        point_value = label
+
+        # Handle key bindings: use allocated keys if available, else fallback
+        shortcut_key = None
+        if label in allocated_map:
+            shortcut_key = allocated_map[label]
+            key_bindings.append((shortcut_key, f"{identifiers['schema']}: {label}"))
+            logger.debug(f"Added allocated key binding '{shortcut_key}' for point {i}")
+        elif not allocated_keys and sequential:
+            # Point 10 is reached with the "0" key, as on a keyboard's number row.
+            shortcut_key = str(i % 10)
+            key_bindings.append((shortcut_key, f"{identifiers['schema']}: {label}"))
+            logger.debug(f"Added key binding '{shortcut_key}' for point {i}")
+
+        data_key_attr = f'data-key="{escape_html_content(shortcut_key)}"' if shortcut_key else ""
+
+        # Show the point number by default (unlabeled circles are a
+        # usability defect); honor an explicit displaying_score: false.
+        label_content = str(i) if annotation_scheme.get("displaying_score", True) else ""
+
+        # Generate radio input for each scale point
+        schematic += f"""
+                    <div class="shadcn-likert-option">
+                        <input class="{identifiers['schema']} shadcn-likert-input annotation-input"
+                               type="radio"
+                               id="{identifiers['id']}"
+                               name="{identifiers['name']}"
+                               value="{escape_html_content(point_value)}"
+                               schema="{identifiers['schema']}"
+                               label_name="{identifiers['label_name']}"
+                               selection_constraint="single"
+                               validation="{validation}"
+                               {data_key_attr}
+                               onclick="onlyOne(this);registerAnnotation(this);">
+                        <label class="shadcn-likert-button" for="{identifiers['id']}"></label>
+                        {f'<span class="shadcn-likert-label">{escape_html_content(label_content)}</span>' if label_content else ''}
+                    </div>
+        """
+
+    # Add max label to complete the scale
+    schematic += f"""
+                </div>
+                <div class="shadcn-likert-endpoint">{escape_html_content(annotation_scheme['max_label'])}</div>
+            </div>
+    """
+
+    # Add optional bad text input for invalid/problematic cases
+    bad_text_content = bad_text_label_content(annotation_scheme)
+    if bad_text_content:
+        logger.debug(f"Adding bad text option for {annotation_scheme['name']}")
+        bad_text_identifiers = generate_element_identifier(annotation_scheme['name'], "bad_text", "radio")
+        schematic += f"""
+            <div class="shadcn-likert-bad-text" style="width: 100%;">
+                <!-- value is the label name, not "0": that hardcoded 0 collided with
+                     scale point 10 under sequential_key_binding, and onlyOne()
+                     de-duplicates by value, so the two could not uncheck each other.
+                     selection_constraint marks it as part of the same single-select
+                     group as the scale points, which it always was. -->
+                <input class="{bad_text_identifiers['schema']} shadcn-likert-input annotation-input"
+                       type="radio"
+                       id="{bad_text_identifiers['id']}"
+                       name="{bad_text_identifiers['name']}"
+                       value="{bad_text_identifiers['label_name']}"
+                       schema="{bad_text_identifiers['schema']}"
+                       label_name="{bad_text_identifiers['label_name']}"
+                       selection_constraint="single"
+                       validation="{validation}"
+                       onclick="onlyOne(this);registerAnnotation(this);">
+                <label class="shadcn-likert-button" for="{bad_text_identifiers['id']}"></label>
+                <span class="shadcn-likert-bad-text-label">
+                    {escape_html_content(bad_text_content)}
+                </span>
+            </div>
+        """
+    schematic += """
+        </fieldset></form>
+    """
+
+    logger.info(f"Successfully generated likert layout for {annotation_scheme['name']} "
+                f"with {annotation_scheme['size']} points")
+    return schematic, key_bindings

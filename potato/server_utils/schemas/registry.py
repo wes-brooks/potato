@@ -333,6 +333,7 @@ def _register_builtin_schemas():
     from .multiselect import generate_multiselect_layout
     from .multirate import generate_multirate_layout
     from .likert import generate_likert_layout
+    from .likert0 import generate_likert0_layout
     from .textbox import generate_textbox_layout
     from .number import generate_number_layout
     from .slider import generate_slider_layout
@@ -420,6 +421,15 @@ def _register_builtin_schemas():
         SchemaDefinition(
             name="likert",
             generator=generate_likert_layout,
+            required_fields=["name", "description", "min_label", "max_label", "size"],
+            optional_fields=["label_requirement", "labels", "displaying_score", "bad_text_label", "sequential_key_binding"],
+            supports_keybindings=True,
+            single_select=True,
+            description="Likert scale rating"
+        ),
+        SchemaDefinition(
+            name="likert0",
+            generator=generate_likert0_layout,
             required_fields=["name", "description", "min_label", "max_label", "size"],
             optional_fields=["label_requirement", "labels", "displaying_score", "bad_text_label", "sequential_key_binding"],
             supports_keybindings=True,
