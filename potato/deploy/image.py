@@ -7,5 +7,5 @@ study deployed from 2.10.3 ran whatever image was newest on the day of each
 
 from potato import __version__
 
-IMAGE_REPO = "ghcr.io/davidjurgens/potato"
+IMAGE_REPO = "ghcr.io/wes-brooks/potato"
 DEFAULT_IMAGE = f"{IMAGE_REPO}:{__version__}"
